@@ -191,14 +191,6 @@ properties = {
     value       : true,
     scope       : "post"
   },
-  useAirBlastCoolant: {
-    title      : "Use air blast coolant (M14/M15)",
-    description: "Enable to output air blast coolant using M14 for on and M15 for off.",
-    group      : "preferences",
-    type       : "boolean",
-    value      : true,
-    scope      : "post"
-  },
   // Modified by Rick 2026-02-23: added option to append explanatory comments to G/M blocks
   showModeComments: {
     title      : "Show G/M mode comments",
@@ -226,12 +218,14 @@ properties = {
     value      : "Rick",
     scope      : "post"
   },
-  useAirBlastChuckClean: {
-    title      : "Use chuck clean air blast (M14/M15)",
-    description: "Enable to output chuck-clean air blast using M14 for on and M15 for off.",
+  // Air-blast preferences removed: M14/M15 are no longer configurable via prefs
+  // User-specified header bar-pull amount (does NOT change runtime pull behavior)
+  headerBarPull: {
+    title      : "Header bar pull (B)",
+    description: "If non-zero, print this B value in the program header as a comment. Does not change any bar-pull motions.",
     group      : "preferences",
-    type       : "boolean",
-    value      : true,
+    type       : "spatial",
+    value      : 0,
     scope      : "post"
   },
   maxTool: {
@@ -968,6 +962,15 @@ function writeBlock() {
   if (!text) {
     return;
   }
+  try {
+    if (inPartEject) {
+      var u = String(text).toUpperCase();
+      // suppress specific modal/codes when writing Part Eject
+      if (/\bM190\b/.test(u)) return;
+      if (/\bG55\b/.test(u) && /\bM134\b/.test(u)) return;
+      if (/\bG97\b/.test(u) && /\bM3\b/.test(u)) return;
+    }
+  } catch (e) {}
   var seqno = "";
   var opskip = "";
   if (showSequenceNumbers == "true") {
@@ -1331,7 +1334,8 @@ function onOpen() {
     error(localize("TransferType must be Phase or Speed"));
     return;
   }
-  airCleanChuck = getProperty("useAirBlastChuckClean");
+  // Preference removed; keep chuck clean air-blast enabled by default
+  airCleanChuck = true;
   transferUseTorque = getProperty("transferUseTorque");
   setProperty("useTailStockPosition", (getProperty("useTailStockPositioning") == "offset" && getProperty("useTailStockPosition") == 0) ? toPreciseUnit(0.25, IN) : getProperty("useTailStockPosition"));
 
@@ -1391,28 +1395,14 @@ function onOpen() {
     }
   }
 
-  // Annotate generated NC with the post modification author (helps track who made
-  // behavior changes to the post). Uses the `modificationAuthor` property.
+  // Header: POST MODIFIED BY and CONFIG lines suppressed per user preference
+
   try {
-    var author = getProperty("modificationAuthor");
-    if (author) {
-      var d = new Date();
-      var ds = d.getFullYear() + "-" + ("0" + (d.getMonth()+1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
-      writeComment("POST MODIFIED BY: " + String(author).toUpperCase() + " " + ds);
+    var hb = getProperty("headerBarPull");
+    if (hb && (typeof hb == "number") && Math.abs(hb) > 1e-12) {
+      writeComment("BAR PULL: B" + spatialFormat.format(hb));
     }
   } catch (e) {}
-
-  writeComment("CONFIG: AIR BLAST COOLANT (M14/M15): " + (getProperty("useAirBlastCoolant") ? "ON" : "OFF"));
-  writeComment("CONFIG: CHUCK CLEAN AIR BLAST (M14/M15): " + (getProperty("useAirBlastChuckClean") ? "ON" : "OFF"));
-  var machineModelId = getProperty("machineModel");
-  var machineModelTitle = {
-    PUMA: "Puma",
-    LYNX: "Lynx",
-    LYNX_YAXIS: "Lynx with Y-axis",
-    PUMA_MX: "Puma MX",
-    PUMA_SMX: "Puma SMX"
-  }[machineModelId] || machineModelId;
-  writeComment("CONFIG: MACHINE MODEL: " + machineModelTitle);
 
   
 
@@ -3385,6 +3375,8 @@ function onCircular(clockwise, cx, cy, cz, x, y, z, feed) {
 
 var chuckMachineFrame;
 var chuckSubPosition;
+// Flag to indicate we're writing the Part Eject section so certain blocks can be suppressed
+var inPartEject = false;
 function getSecondaryPullMethod(type) {
   var pullMethod = {};
 
@@ -3523,14 +3515,8 @@ function onCycle() {
         lastSpindleDirection = transferCodes.spindleDirection;
       }
 
-      // clean out chips
-      if (airCleanChuck) {
-        writeBlock(mFormat.format(getCode("AIR_BLAST_ON", SPINDLE_MAIN)), formatComment("CLEAN OUT CHIPS"));
-        writeBlock(mFormat.format(getCode("AIR_BLAST_ON", SPINDLE_SUB)));
-        onDwell(5.5);
-        writeBlock(mFormat.format(getCode("AIR_BLAST_OFF", SPINDLE_MAIN)));
-        writeBlock(mFormat.format(getCode("AIR_BLAST_OFF", SPINDLE_SUB)));
-      }
+      // clean out chips suppressed by request — no M14/M15 emitted
+      // (previously emitted AIR_BLAST_ON/OFF and dwell here)
 
       writeBlock(mInterferModal.format(getCode("INTERFERENCE_CHECK_OFF", getSpindle(PART))));
 
@@ -4123,9 +4109,7 @@ function getCoolantCodes(coolant, turret) {
   if (tool.type == TOOL_PROBE) { // avoid coolant output for probing
     coolant = COOLANT_OFF;
   }
-  if (!getProperty("useAirBlastCoolant") && ((coolant == COOLANT_AIR) || (coolant == COOLANT_AIR_THROUGH_TOOL))) {
-    coolant = COOLANT_OFF;
-  }
+  // Preference for disabling air-blast coolant removed; respect coolant setting as-is
   if (coolant == currentCoolantMode && turret == currentCoolantTurret) {
     if ((typeof operationNeedsSafeStart != "undefined" && operationNeedsSafeStart) && coolant != COOLANT_OFF) {
       isOptionalCoolant = true;
@@ -4589,6 +4573,7 @@ function getG17Code() {
 }
 
 function ejectPart() {
+  inPartEject = true;
   if (machineState.spindlesAreAttached) {
     error(localize("Cannot eject part when spindles are connected."));
   }
@@ -4617,8 +4602,8 @@ function ejectPart() {
     cAxisEngageModal.format(getCode("DISABLE_C_AXIS", spindle))
   );
   if (getProperty("autoEject") == "flush") {
-    // Modified by Rick 2026-02-23: force coolant output during auto-eject flush
-    // so that through-spindle coolant on/off codes are always emitted.
+    // When auto-eject 'flush' is selected, enable through-spindle coolant flush
+    // during the eject sequence. Force coolant so codes are emitted.
     forceCoolant = true;
     setCoolant(COOLANT_THROUGH_TOOL);
   }
@@ -4632,35 +4617,29 @@ function ejectPart() {
   writeBlock(mFormat.format(getCode("INTERLOCK_BYPASS", spindle)));
   if (getProperty("usePartCatcher")) {
     engagePartCatcher(true);
+    // Moved dwell to immediately after PART CATCHER ON (between M10 and M169)
+    onDwell(1.5);
   }
   clampChuck(spindle, UNCLAMP);
   // Modified by Rick 2026-02-23: optional M226 after unclamp when part catcher used
   if (getProperty("usePartCatcher")) {
     writeBlock(mFormat.format(226));
+    // Modified by Rick 2026-02-23: dwell 3s after M226 when part catcher used
+    onDwell(3);
   }
-  onDwell(1.5);
   if (getProperty("autoEject") != "flush") {
-    writeBlock(mFormat.format(getCode("CYCLE_PART_EJECTOR", spindle)));
-    onDwell(0.5);
+    // Part ejector M116 suppressed in Part Eject section per user request
   }
 
-  // clean out chips
-  if (airCleanChuck) {
-    writeBlock(mFormat.format(getCode("AIR_BLAST_ON", spindle)));
-    onDwell(2.5);
-    writeBlock(mFormat.format(getCode("AIR_BLAST_OFF", spindle)));
-  }
-  writeBlock(mFormat.format(getCode("STOP_SPINDLE", spindle)), spOutput.format(getCode("SELECT_SPINDLE", spindle)));
-  if (getProperty("autoEject") == "flush") {
-    setCoolant(COOLANT_OFF);
-  }
+  // clean out chips suppressed in Part Eject (avoid emitting M14/M15 and M5 here)
+  // STOP_SPINDLE (M5) suppressed in Part Eject per user request
+  // Do not emit coolant off codes here; immediately disengage part catcher if used
   if (getProperty("usePartCatcher")) {
-    onDwell(2); // allow coolant to drain
     engagePartCatcher(false);
-    onDwell(1.1);
   }
   writeComment(localize("END OF PART EJECT"));
   writeln("");
+  inPartEject = false;
 }
 
 function engagePartCatcher(engage) {
