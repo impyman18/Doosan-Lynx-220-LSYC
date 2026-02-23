@@ -199,6 +199,7 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  // Modified by Rick 2026-02-23: added option to append explanatory comments to G/M blocks
   showModeComments: {
     title      : "Show G/M mode comments",
     description: "When enabled, the post will append short explanatory comments for G- and M-codes and common modal words (S, F, T, axis moves).",
@@ -207,12 +208,22 @@ properties = {
     value      : false,
     scope      : "post"
   },
+  // Modified by Rick 2026-02-23: option to inject TSC flush codes during secondary spindle transfer
   injectSecondaryTSC: {
     title      : "Part flush during transfer",
     description: "When enabled, insert M108 after M5 and M109 after M31 during secondary-spindle transfer (secondary chuck).",
     group      : "preferences",
     type       : "boolean",
     value      : true,
+    scope      : "post"
+  },
+  // Modified by Rick 2026-02-23: property to include author's name in generated NC headers
+  modificationAuthor: {
+    title      : "Modification author",
+    description: "Name to include in generated NC to indicate who modified the post.",
+    group      : "preferences",
+    type       : "string",
+    value      : "Rick",
     scope      : "post"
   },
   useAirBlastChuckClean: {
@@ -573,7 +584,7 @@ var singleLineCoolant = false; // specifies to output multiple coolant codes in 
 var coolants = [
   {id:COOLANT_FLOOD, on:8, off:9},
   {id:COOLANT_MIST, on:138, off:139},
-  {id:COOLANT_THROUGH_TOOL, spindle1:{on:"M108 (TSC FLUSH ON)", off:"M109 (TSC FLUSH OFF)"}, spindle2:{on:"M108 (TSC FLUSH ON)", off:"M109 (TSC FLUSH OFF)"}, spindleLive:{on:308, off:309}},
+  {id:COOLANT_THROUGH_TOOL, spindle1:{on:"M108 (TSC FLUSH ON)", off:"M109 (TSC FLUSH OFF)"}, spindle2:{on:"M108 (TSC FLUSH ON)", off:"M109 (TSC FLUSH OFF)"}, spindleLive:{on:308, off:309}}, // Modified by Rick 2026-02-23: mapped TSC for spindle2 to M108/M109 and added comment strings
   {id:COOLANT_AIR, spindle1:{on:14, off:15}, spindle2:{on:14, off:15}},
   {id:COOLANT_AIR_THROUGH_TOOL},
   {id:COOLANT_SUCTION, on:7, off:9},
@@ -586,7 +597,7 @@ var permittedCommentChars = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,=_-/";
 
 // When a section comment contains 'SECONDARY SPINDLE CHUCK' we set this flag
 // so we can inject M108/M109 at specific points within that section.
-var pendingSecondaryChuckSpecial = false;
+var pendingSecondaryChuckSpecial = false; // Modified by Rick 2026-02-23: track secondary chuck section to inject part-flush M108/M109
 
 var gFormat = createFormat({prefix:"G", decimals:1});
 var mFormat = createFormat({prefix:"M", decimals:0});
@@ -968,6 +979,7 @@ function writeBlock() {
   if (text) {
     // Optionally append short comments describing G/M modes and common modals
     try {
+      // Modified by Rick 2026-02-23: code to optionally append explanatory comments for G/M/modal tokens
       if (getProperty("showModeComments")) {
         var parts = String(text).split(/\s+/);
         var seen = {};
@@ -1033,7 +1045,8 @@ function writeBlock() {
         if (comments.length > 0) {
           var c = comments.join('; ');
           writeWords(opskip, seqno, text, formatComment(c));
-          // inject M108/M109 for secondary spindle chuck section when appropriate
+          // Modified by Rick 2026-02-23: inject M108 after M5 and M109 after M31 when
+          // in the 'SECONDARY SPINDLE CHUCK' section and preference enabled
           try {
             var txt = String(text).toUpperCase();
             if (getProperty("injectSecondaryTSC") && pendingSecondaryChuckSpecial) {
@@ -1053,7 +1066,7 @@ function writeBlock() {
       // fall back to normal write on error
     }
     writeWords(opskip, seqno, text);
-    // inject M108/M109 for secondary spindle chuck section when appropriate
+    // Modified by Rick 2026-02-23: secondary chuck injection after normal block output
     try {
       var txt2 = String(text).toUpperCase();
       if (getProperty("injectSecondaryTSC") && pendingSecondaryChuckSpecial) {
@@ -1079,6 +1092,8 @@ function formatComment(text) {
 function writeComment(text) {
   writeln(formatComment(text));
   try {
+    // Modified by Rick 2026-02-23: detect the 'SECONDARY SPINDLE CHUCK' section
+    // comment so we know to inject part-flush M108/M109 at the correct spots.
     if (getProperty("injectSecondaryTSC")) {
       var t = String(text).toUpperCase();
       if (t.indexOf("SECONDARY SPINDLE CHUCK") >= 0) {
@@ -1373,6 +1388,17 @@ function onOpen() {
       writeComment(localize("post modified") + ": " + getHeaderDate());
     }
   }
+
+  // Annotate generated NC with the post modification author (helps track who made
+  // behavior changes to the post). Uses the `modificationAuthor` property.
+  try {
+    var author = getProperty("modificationAuthor");
+    if (author) {
+      var d = new Date();
+      var ds = d.getFullYear() + "-" + ("0" + (d.getMonth()+1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
+      writeComment("POST MODIFIED BY: " + String(author).toUpperCase() + " " + ds);
+    }
+  } catch (e) {}
 
   writeComment("CONFIG: AIR BLAST COOLANT (M14/M15): " + (getProperty("useAirBlastCoolant") ? "ON" : "OFF"));
   writeComment("CONFIG: CHUCK CLEAN AIR BLAST (M14/M15): " + (getProperty("useAirBlastChuckClean") ? "ON" : "OFF"));
@@ -4587,6 +4613,8 @@ function ejectPart() {
     cAxisEngageModal.format(getCode("DISABLE_C_AXIS", spindle))
   );
   if (getProperty("autoEject") == "flush") {
+    // Modified by Rick 2026-02-23: force coolant output during auto-eject flush
+    // so that through-spindle coolant on/off codes are always emitted.
     forceCoolant = true;
     setCoolant(COOLANT_THROUGH_TOOL);
   }
@@ -4602,6 +4630,7 @@ function ejectPart() {
     engagePartCatcher(true);
   }
   clampChuck(spindle, UNCLAMP);
+  // Modified by Rick 2026-02-23: optional M226 after unclamp when part catcher used
   if (getProperty("usePartCatcher")) {
     writeBlock(mFormat.format(226));
   }
