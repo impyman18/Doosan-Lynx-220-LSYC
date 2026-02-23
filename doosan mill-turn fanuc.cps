@@ -11,6 +11,53 @@
 */
 
 ///////////////////////////////////////////////////////////////////////////////
+/*
+  MODIFICATIONS (2026-02-23)
+
+  Summary of changes made to this post for Doosan Lynx/Puma machines:
+
+  - Added insertion of M226 after unclamp in Part Eject sequence.
+    * `ejectPart()` now writes M226 when `usePartCatcher` is enabled.
+
+  - Updated through-spindle coolant (TSC) mapping:
+    * `COOLANT_THROUGH_TOOL` now emits explicit `M108 (TSC FLUSH ON)` and
+      `M109 (TSC FLUSH OFF)` for both spindle1 and spindle sub-spindle (spindle2).
+    * The mapping values were changed from numeric codes (126/127) to
+      explicit M-code strings including short comments to make generated NC clearer.
+
+  - Force coolant during auto-eject flush:
+    * `ejectPart()` sets `forceCoolant = true` before calling
+      `setCoolant(COOLANT_THROUGH_TOOL)` so the post will always emit
+      the TSC on/off codes for the flush.
+
+  - Added `showModeComments` preference and output comment support:
+    * New boolean property `showModeComments` (Preferences) — when enabled
+      `writeBlock()` will append short explanatory comments for common
+      G/M codes and modal tokens (S, F, T, axis moves) to help reviewers.
+
+  - Added Secondary Spindle Chuck TSC injection feature:
+    * New preference `Part flush during transfer` (property `injectSecondaryTSC`).
+      Default: true.
+    * When enabled, the post detects the "SECONDARY SPINDLE CHUCK" section
+      (comment) and will inject `M108` immediately after a block that contains
+      `M5` and `M109` immediately after a block that contains `M31` (then clears
+      the pending state). This behavior is guarded by the new preference.
+    * Implementation details: `pendingSecondaryChuckSpecial` flag set when the
+      section comment is written; `writeBlock()` emits the injected M-codes when
+      the flag is active and the matching M5/M31 tokens are seen.
+
+  - Miscellaneous: small helper changes in `writeBlock()` / `writeComment()` to
+    support the above features and to avoid changing existing behaviour when
+    preferences are not enabled.
+
+  Files changed:
+  - Doosan-Lynx-220-LSYC/doosan mill-turn fanuc.cps
+
+  Notes for commit message:
+  - Include this block in the commit to explain the behavioral diffs to reviewers.
+  - These changes are additive and guarded by post properties where sensible.
+
+*/
 //                        MANUAL NC COMMANDS
 //
 // The following ACTION commands are supported by this post.
@@ -147,6 +194,22 @@ properties = {
   useAirBlastCoolant: {
     title      : "Use air blast coolant (M14/M15)",
     description: "Enable to output air blast coolant using M14 for on and M15 for off.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
+  showModeComments: {
+    title      : "Show G/M mode comments",
+    description: "When enabled, the post will append short explanatory comments for G- and M-codes and common modal words (S, F, T, axis moves).",
+    group      : "preferences",
+    type       : "boolean",
+    value      : false,
+    scope      : "post"
+  },
+  injectSecondaryTSC: {
+    title      : "Part flush during transfer",
+    description: "When enabled, insert M108 after M5 and M109 after M31 during secondary-spindle transfer (secondary chuck).",
     group      : "preferences",
     type       : "boolean",
     value      : true,
@@ -510,7 +573,7 @@ var singleLineCoolant = false; // specifies to output multiple coolant codes in 
 var coolants = [
   {id:COOLANT_FLOOD, on:8, off:9},
   {id:COOLANT_MIST, on:138, off:139},
-  {id:COOLANT_THROUGH_TOOL, spindle1:{on:108, off:109}, spindle2:{on:126, off:127}, spindleLive:{on:308, off:309}},
+  {id:COOLANT_THROUGH_TOOL, spindle1:{on:"M108 (TSC FLUSH ON)", off:"M109 (TSC FLUSH OFF)"}, spindle2:{on:"M108 (TSC FLUSH ON)", off:"M109 (TSC FLUSH OFF)"}, spindleLive:{on:308, off:309}},
   {id:COOLANT_AIR, spindle1:{on:14, off:15}, spindle2:{on:14, off:15}},
   {id:COOLANT_AIR_THROUGH_TOOL},
   {id:COOLANT_SUCTION, on:7, off:9},
@@ -520,6 +583,10 @@ var coolants = [
 ];
 
 var permittedCommentChars = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,=_-/";
+
+// When a section comment contains 'SECONDARY SPINDLE CHUCK' we set this flag
+// so we can inject M108/M109 at specific points within that section.
+var pendingSecondaryChuckSpecial = false;
 
 var gFormat = createFormat({prefix:"G", decimals:1});
 var mFormat = createFormat({prefix:"M", decimals:0});
@@ -899,7 +966,106 @@ function writeBlock() {
     opskip = "/";
   }
   if (text) {
+    // Optionally append short comments describing G/M modes and common modals
+    try {
+      if (getProperty("showModeComments")) {
+        var parts = String(text).split(/\s+/);
+        var seen = {};
+        var comments = [];
+        var map = {
+          G0: "Rapid positioning",
+          G1: "Linear interpolation (feed)",
+          G4: "Dwell",
+          G17: "XY plane selection",
+          G18: "XZ plane selection",
+          G19: "YZ plane selection",
+          G20: "Inches units",
+          G21: "Millimetres units",
+          G28: "Return to machine/home position",
+          G53: "Machine coordinate system (non-modal)",
+          G54: "Work offset G54",
+          G80: "Cancel canned cycle",
+          G96: "Constant surface speed (CSS) on",
+          G97: "Constant surface speed off (use RPM)",
+          G98: "Return to initial point after canned cycle",
+          G99: "Return to R plane after canned cycle",
+          G50: "Cancel spindle speed conversion / set limit",
+          M0: "Program stop",
+          M1: "Optional stop",
+          M2: "End of program",
+          M3: "Spindle on clockwise",
+          M4: "Spindle on counter-clockwise",
+          M5: "Spindle stop",
+          M8: "Coolant on (flood)",
+          M9: "Coolant off",
+          M10: "Part catcher ON",
+          M11: "Part catcher OFF",
+          M108: "TSC flush ON (through-spindle coolant)",
+          M109: "TSC flush OFF (through-spindle coolant)",
+          M226: "User M226 (part eject/option)",
+          M111: "End/optional program control (vendor specific)",
+          M126: "(previously sub TSC on)",
+          M127: "(previously sub TSC off)"
+        };
+        for (var i = 0; i < parts.length; ++i) {
+          var p = parts[i].replace(/[,;]$/, "");
+          if (!p) continue;
+          var key = p.toUpperCase();
+          // token can be letter+number (e.g., G1, M3, S1500, X0.5)
+          if (/^[GM]\d+/i.test(key)) {
+            var base = key.match(/^[GM]\d+/i)[0].toUpperCase();
+            if (!seen[base]) {
+              seen[base] = true;
+              if (map[base]) comments.push(map[base]);
+              else comments.push(base + " (G/M code)");
+            }
+          } else if (/^[SFTXYZABCU]\-?\d+/i.test(key)) {
+            var prefix = key.charAt(0).toUpperCase();
+            if (!seen[prefix]) {
+              seen[prefix] = true;
+              if (prefix == 'S') comments.push('Spindle speed (S)');
+              else if (prefix == 'F') comments.push('Feedrate (F)');
+              else if (prefix == 'T') comments.push('Tool selection (T)');
+              else comments.push(prefix + ' axis or modal');
+            }
+          }
+        }
+        if (comments.length > 0) {
+          var c = comments.join('; ');
+          writeWords(opskip, seqno, text, formatComment(c));
+          // inject M108/M109 for secondary spindle chuck section when appropriate
+          try {
+            var txt = String(text).toUpperCase();
+            if (getProperty("injectSecondaryTSC") && pendingSecondaryChuckSpecial) {
+              if (/\bM5\b/.test(txt)) {
+                writeWords("", "", mFormat.format(108));
+              }
+              if (/\bM31\b/.test(txt)) {
+                writeWords("", "", mFormat.format(109));
+                pendingSecondaryChuckSpecial = false;
+              }
+            }
+          } catch (e) {}
+          return;
+        }
+      }
+    } catch (e) {
+      // fall back to normal write on error
+    }
     writeWords(opskip, seqno, text);
+    // inject M108/M109 for secondary spindle chuck section when appropriate
+    try {
+      var txt2 = String(text).toUpperCase();
+      if (getProperty("injectSecondaryTSC") && pendingSecondaryChuckSpecial) {
+        if (/\bM5\b/.test(txt2)) {
+          writeWords("", "", mFormat.format(108));
+        }
+        if (/\bM31\b/.test(txt2)) {
+          writeWords("", "", mFormat.format(109));
+          pendingSecondaryChuckSpecial = false;
+        }
+      }
+    } catch (e) {}
   }
 }
 
@@ -912,6 +1078,14 @@ function formatComment(text) {
 */
 function writeComment(text) {
   writeln(formatComment(text));
+  try {
+    if (getProperty("injectSecondaryTSC")) {
+      var t = String(text).toUpperCase();
+      if (t.indexOf("SECONDARY SPINDLE CHUCK") >= 0) {
+        pendingSecondaryChuckSpecial = true;
+      }
+    }
+  } catch (e) {}
 }
 
 function getB(abc, section) {
@@ -4413,6 +4587,7 @@ function ejectPart() {
     cAxisEngageModal.format(getCode("DISABLE_C_AXIS", spindle))
   );
   if (getProperty("autoEject") == "flush") {
+    forceCoolant = true;
     setCoolant(COOLANT_THROUGH_TOOL);
   }
   gSpindleModeModal.reset();
@@ -4427,6 +4602,9 @@ function ejectPart() {
     engagePartCatcher(true);
   }
   clampChuck(spindle, UNCLAMP);
+  if (getProperty("usePartCatcher")) {
+    writeBlock(mFormat.format(226));
+  }
   onDwell(1.5);
   if (getProperty("autoEject") != "flush") {
     writeBlock(mFormat.format(getCode("CYCLE_PART_EJECTOR", spindle)));
