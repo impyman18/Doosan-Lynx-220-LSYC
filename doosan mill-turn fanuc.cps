@@ -144,6 +144,22 @@ properties = {
     value       : true,
     scope       : "post"
   },
+  useAirBlastCoolant: {
+    title      : "Use air blast coolant (M14/M15)",
+    description: "Enable to output air blast coolant using M14 for on and M15 for off.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
+  useAirBlastChuckClean: {
+    title      : "Use chuck clean air blast (M14/M15)",
+    description: "Enable to output chuck-clean air blast using M14 for on and M15 for off.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
   maxTool: {
     title      : "Max tool number",
     description: "Defines the maximum tool number.",
@@ -495,7 +511,7 @@ var coolants = [
   {id:COOLANT_FLOOD, on:8, off:9},
   {id:COOLANT_MIST, on:138, off:139},
   {id:COOLANT_THROUGH_TOOL, spindle1:{on:108, off:109}, spindle2:{on:126, off:127}, spindleLive:{on:308, off:309}},
-  {id:COOLANT_AIR, spindle1:{on:14, off:15}, spindle2:{on:114, off:115}},
+  {id:COOLANT_AIR, spindle1:{on:14, off:15}, spindle2:{on:14, off:15}},
   {id:COOLANT_AIR_THROUGH_TOOL},
   {id:COOLANT_SUCTION, on:7, off:9},
   {id:COOLANT_FLOOD_MIST},
@@ -839,9 +855,9 @@ function getCode(code, spindle) {
   case "CYCLE_PART_EJECTOR":
     return 116;
   case "AIR_BLAST_ON":
-    return (spindle == SPINDLE_MAIN) ? 14 : 114;
+    return 14;
   case "AIR_BLAST_OFF":
-    return (spindle == SPINDLE_MAIN) ? 15 : 115;
+    return 15;
   default:
     error(localize("Command " + code + " is not defined."));
     return 0;
@@ -1126,6 +1142,7 @@ function onOpen() {
     error(localize("TransferType must be Phase or Speed"));
     return;
   }
+  airCleanChuck = getProperty("useAirBlastChuckClean");
   transferUseTorque = getProperty("transferUseTorque");
   setProperty("useTailStockPosition", (getProperty("useTailStockPositioning") == "offset" && getProperty("useTailStockPosition") == 0) ? toPreciseUnit(0.25, IN) : getProperty("useTailStockPosition"));
 
@@ -1182,6 +1199,18 @@ function onOpen() {
       writeComment(localize("post modified") + ": " + getHeaderDate());
     }
   }
+
+  writeComment("CONFIG: AIR BLAST COOLANT (M14/M15): " + (getProperty("useAirBlastCoolant") ? "ON" : "OFF"));
+  writeComment("CONFIG: CHUCK CLEAN AIR BLAST (M14/M15): " + (getProperty("useAirBlastChuckClean") ? "ON" : "OFF"));
+  var machineModelId = getProperty("machineModel");
+  var machineModelTitle = {
+    PUMA: "Puma",
+    LYNX: "Lynx",
+    LYNX_YAXIS: "Lynx with Y-axis",
+    PUMA_MX: "Puma MX",
+    PUMA_SMX: "Puma SMX"
+  }[machineModelId] || machineModelId;
+  writeComment("CONFIG: MACHINE MODEL: " + machineModelTitle);
 
   // dump machine configuration
   var vendor = machineConfiguration.getVendor();
@@ -3888,6 +3917,9 @@ function getCoolantCodes(coolant, turret) {
     error(localize("Coolants have not been defined."));
   }
   if (tool.type == TOOL_PROBE) { // avoid coolant output for probing
+    coolant = COOLANT_OFF;
+  }
+  if (!getProperty("useAirBlastCoolant") && ((coolant == COOLANT_AIR) || (coolant == COOLANT_AIR_THROUGH_TOOL))) {
     coolant = COOLANT_OFF;
   }
   if (coolant == currentCoolantMode && turret == currentCoolantTurret) {
