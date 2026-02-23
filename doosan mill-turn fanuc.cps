@@ -1358,6 +1358,8 @@ function onOpen() {
   sequenceNumber = getProperty("sequenceNumberStart");
   writeln("%");
 
+  
+
   if (programName) {
     var programId;
     try {
@@ -1411,6 +1413,8 @@ function onOpen() {
     PUMA_SMX: "Puma SMX"
   }[machineModelId] || machineModelId;
   writeComment("CONFIG: MACHINE MODEL: " + machineModelTitle);
+
+  
 
   // dump machine configuration
   var vendor = machineConfiguration.getVendor();
